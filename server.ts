@@ -10,6 +10,9 @@ import { prospectsRouter } from './zack-backend/zack-backend/src/routes/prospect
 import { queueRouter } from './zack-backend/zack-backend/src/routes/queue.js';
 import { voiceRouter } from './zack-backend/zack-backend/src/routes/voice.js';
 import { requireAuth } from './zack-backend/zack-backend/src/routes/authMiddleware.js';
+import { aiRouter } from './zack-backend/zack-backend/src/routes/ai.js';
+import { icpRouter } from './zack-backend/zack-backend/src/routes/icp.js';
+import { statsRouter } from './zack-backend/zack-backend/src/routes/stats.js';
 
 async function startServer() {
   const app = express();
@@ -31,6 +34,9 @@ async function startServer() {
   app.use('/api/prospects', requireAuth, prospectsRouter);
   app.use('/api/queue', requireAuth, queueRouter);
   app.use('/api/voice', requireAuth, voiceRouter);
+  app.use('/api/ai', requireAuth, aiRouter);
+  app.use('/api/icp', requireAuth, icpRouter);
+  app.use('/api/stats', requireAuth, statsRouter);
 
   app.get('/health', (req, res) => res.json({ ok: true }));
   app.get('/api/health', (req, res) => res.json({ ok: true }));

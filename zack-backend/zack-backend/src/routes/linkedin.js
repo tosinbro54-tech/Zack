@@ -12,8 +12,13 @@ linkedinRouter.post('/session', async (req, res) => {
   const { liAt, jsessionId, csrf, proxy } = req.body;
   if (!liAt || !jsessionId) return res.status(400).json({ error: 'liAt and jsessionId are required' });
 
-  await saveSession(userId, { liAt, jsessionId, csrf, proxy });
-  res.json({ ok: true });
+  try {
+    await saveSession(userId, { liAt, jsessionId, csrf, proxy });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[linkedin/session]', err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
 });
 
 // Makes one lightweight authenticated request to confirm the cookies are live.
@@ -70,4 +75,3 @@ linkedinRouter.post('/mine', async (req, res) => {
   ];
   res.json(commenters);
 });
-

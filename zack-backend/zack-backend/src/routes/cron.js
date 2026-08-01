@@ -3,6 +3,9 @@ import { config } from '../config.js';
 import { runDueActionsForAllUsers } from '../jobs/runDueActions.js';
 import { runDailyReportForUser } from '../jobs/dailyMaintenance.js';
 import { supabase } from '../db/supabaseClient.js';
+import { discoverNewPostsForUser } from '../services/discovery.js';
+import { syncInboxSummaryForUser } from '../services/inboxSync.js';
+import { buildConnectQueueForUser } from '../services/connectQueueBuilder.js';
 
 export const cronRouter = Router();
 
@@ -14,10 +17,17 @@ function requireCronSecret(req, res, next) {
   next();
 }
 
-// Pinged every 5-15 min by your external cron service.
 cronRouter.post('/run-actions', requireCronSecret, async (req, res) => {
   try {
     await runDueActionsForAllUsers();
+
+    const { data: activeUsers } = await supabase.from('linkedin_sessions').select('user_id').eq('status', 'active');
+    for (const u of activeUsers || []) {
+      await discoverNewPostsForUser(u.user_id).catch((err) => console.error('[discovery]', err));
+      await buildConnectQueueForUser(u.user_id).catch((err) => console.error('[connect-queue]', err));
+      await syncInboxSummaryForUser(u.user_id).catch((err) => console.error('[inbox-sync]', err));
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[cron/run-actions]', err);
@@ -25,7 +35,6 @@ cronRouter.post('/run-actions', requireCronSecret, async (req, res) => {
   }
 });
 
-// Pinged once/day (e.g. 8pm) by your external cron service.
 cronRouter.post('/daily-report', requireCronSecret, async (req, res) => {
   try {
     const { data: users } = await supabase.from('linkedin_sessions').select('user_id');

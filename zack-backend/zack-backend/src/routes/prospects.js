@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabaseClient.js';
 import { isProfileTracked } from '../services/dedup.js';
+import { discoverNewPostsForUser } from '../services/discovery.js';
+import { withSession } from '../services/playwrightSession.js';
+import { getDecryptedSession } from '../services/sessionVault.js';
+import { mineComments } from '../services/linkedinActions.js';
+import { passesPreFilter } from '../services/icpScoring.js';
 
 export const prospectsRouter = Router();
 
@@ -57,3 +62,80 @@ prospectsRouter.delete('/:id', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
+
+// Returns posts already discovered by the background scan - instant, no live scraping.
+prospectsRouter.get('/discover-posts', async (req, res) => {
+  const { data, error } = await supabase
+    .from('discovered_posts')
+    .select('*')
+    .eq('user_id', req.user.id)
+    .eq('status', 'pending')
+    .order('discovered_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Moves a discovered post's drafted comment into the real action queue (jittered, respects caps/approval).
+prospectsRouter.post('/discover-posts/:id/queue-comment', async (req, res) => {
+  const { data: post, error } = await supabase
+    .from('discovered_posts')
+    .select('*')
+    .eq('id', req.params.id)
+    .eq('user_id', req.user.id)
+    .single();
+  if (error || !post) return res.status(404).json({ error: 'not found' });
+
+  const scheduledAt = new Date(Date.now() + (5 + Math.random() * 55) * 60_000).toISOString(); // 5-60 min out
+
+  await supabase.from('action_queue').insert({
+    user_id: req.user.id,
+    action_type: 'comment',
+    tracked_profile_id: post.tracked_profile_id,
+    post_urn: post.post_urn,
+    payload: { postUrl: post.post_url, text: post.drafted_comment },
+    requires_approval: true,
+    status: 'scheduled',
+    scheduled_at: scheduledAt,
+  });
+
+  await supabase.from('discovered_posts').update({ status: 'queued' }).eq('id', post.id);
+  res.json({ ok: true });
+});
+
+// Real auto-drafted comments waiting for review - powers the Comment agent's live feed.
+prospectsRouter.get('/live-comment-drafts', async (req, res) => {
+  const { data: fromDiscovery } = await supabase
+    .from('discovered_posts')
+    .select('id, post_text, author_name, drafted_comment, discovered_at, tracked_profile_id')
+    .eq('user_id', req.user.id)
+    .eq('status', 'pending')
+    .not('drafted_comment', 'is', null)
+    .order('discovered_at', { ascending: false })
+    .limit(20);
+
+  res.json(fromDiscovery || []);
+});
+
+// On-demand: live-mine ONE post's comment section right now, return pre-filtered candidates for review.
+// Synchronous since it's a single page load, not a full scan - fine within Render's request timeout.
+prospectsRouter.post('/mine-comments', async (req, res) => {
+  const { postUrl } = req.body;
+  if (!postUrl) return res.status(400).json({ error: 'postUrl is required' });
+
+  const session = await getDecryptedSession(req.user.id);
+  if (!session || session.status !== 'active') return res.status(400).json({ error: 'no active LinkedIn session' });
+
+  try {
+    const candidates = await withSession(session, async (page) => {
+      const result = await mineComments(page, { postUrl });
+      if (!result.success) return [];
+      return result.comments.filter((c) =>
+        passesPreFilter({ commentText: c.text, headline: null, icpCriteria: null })
+      );
+    });
+    res.json(candidates);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+

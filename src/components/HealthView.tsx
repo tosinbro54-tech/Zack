@@ -3,26 +3,71 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { api } from '../lib/api';
 
-interface HealthViewProps {
-  onUpdateSetting: () => void;
+interface HealthData {
+  session: { status: string; lastVerifiedAt: string | null; consecutiveFailures: number };
+  gauges: {
+    comments: { used: number; cap: number };
+    connects: { used: number; cap: number };
+    dms: { used: number; cap: number };
+    total: { used: number; cap: number };
+  };
+  warnings7d: number;
+  risk: string;
+  settings: { auto_approve_comments: boolean; auto_approve_connects: boolean; auto_approve_dms: boolean };
 }
 
-export const HealthView: React.FC<HealthViewProps> = ({ onUpdateSetting }) => {
+export const HealthView: React.FC = () => {
+  const [data, setData] = useState<HealthData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get('/api/stats/health').then(setData).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+
+  const updateSetting = async (key: string, value: boolean) => {
+    if (!data) return;
+    setSaving(key);
+    const prevSettings = data.settings;
+    setData({ ...data, settings: { ...data.settings, [key]: value } });
+    try {
+      await api.patch('/api/queue/settings', { [key]: value });
+    } catch {
+      setData({ ...data, settings: prevSettings });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  if (loading || !data) {
+    return (
+      <div className="page-top">
+        <div>
+          <div className="page-lbl">Safety</div>
+          <h1 className="page-h">Account health</h1>
+          <p className="page-sub">Loading…</p>
+        </div>
+      </div>
+    );
+  }
+
+  const statusColor = data.session.status === 'active' ? 'var(--suc)' : data.session.status === 'checkpoint' ? 'var(--err)' : '#d9a441';
+  const riskColor = data.risk === 'Low' ? 'var(--suc)' : data.risk === 'High' ? 'var(--err)' : '#d9a441';
+
   const gauges = [
-    { label: 'Connection requests (today)', used: 8, limit: 20, color: 'var(--suc)' },
-    { label: 'Comments sent (today)', used: 12, limit: 25, color: 'var(--suc)' },
-    { label: 'DMs sent (today)', used: 5, limit: 30, color: 'var(--suc)' },
-    { label: 'Profile views (today)', used: 23, limit: 50, color: 'var(--acc)' },
-    { label: 'Total actions (today)', used: 48, limit: 80, color: 'var(--acc)' }
+    { label: 'Comments sent (24h)', used: data.gauges.comments.used, limit: data.gauges.comments.cap, color: 'var(--suc)' },
+    { label: 'Connection requests (24h)', used: data.gauges.connects.used, limit: data.gauges.connects.cap, color: 'var(--suc)' },
+    { label: 'DMs sent (24h)', used: data.gauges.dms.used, limit: data.gauges.dms.cap, color: 'var(--suc)' },
+    { label: 'Total actions (24h)', used: data.gauges.total.used, limit: data.gauges.total.cap, color: 'var(--acc)' },
   ];
 
-  const safetySettings = [
-    { id: 'ht1', label: 'Pause-on-warning (auto-pause if LinkedIn flags)', def: true },
-    { id: 'ht2', label: 'Require manual approval for all DMs', def: true },
-    { id: 'ht3', label: 'Randomise send timing (±12 min window)', def: true },
-    { id: 'ht4', label: 'Send daily activity report to email', def: false }
+  const toggles = [
+    { key: 'auto_approve_comments', label: 'Auto-approve comments', checked: data.settings.auto_approve_comments },
+    { key: 'auto_approve_connects', label: 'Auto-approve connection requests', checked: data.settings.auto_approve_connects },
+    { key: 'auto_approve_dms', label: 'Auto-send DMs without approval', checked: data.settings.auto_approve_dms },
   ];
 
   return (
@@ -32,7 +77,7 @@ export const HealthView: React.FC<HealthViewProps> = ({ onUpdateSetting }) => {
           <div className="page-lbl">Safety</div>
           <h1 className="page-h">Account health</h1>
           <p className="page-sub">
-            Real-time rate limits and safety status. Zack auto-pauses if any ceiling is breached.
+            Real 24h rate limits from your action history. Zack auto-pauses on checkpoints or repeated failures.
           </p>
         </div>
       </div>
@@ -41,29 +86,33 @@ export const HealthView: React.FC<HealthViewProps> = ({ onUpdateSetting }) => {
         <div className="metric-card">
           <div className="text-[10px] uppercase tracking-wider text-[var(--txt2)] mb-2">Session status</div>
           <div className="flex items-center gap-2">
-            <div className="w-2.5 h-2.5 rounded-full bg-[var(--suc)]"></div>
-            <span className="font-display text-[18px] font-bold text-[var(--suc)]">Active</span>
+            <div className="w-2.5 h-2.5 rounded-full" style={{ background: statusColor }}></div>
+            <span className="font-display text-[18px] font-bold" style={{ color: statusColor }}>
+              {data.session.status.charAt(0).toUpperCase() + data.session.status.slice(1)}
+            </span>
           </div>
         </div>
         <div className="metric-card">
-          <div className="text-[10px] uppercase tracking-wider text-[var(--txt2)] mb-2">Warnings (7d)</div>
-          <div className="font-display text-[28px] font-extrabold text-[var(--suc)]">0</div>
+          <div className="text-[10px] uppercase tracking-wider text-[var(--txt2)] mb-2">Failed actions (7d)</div>
+          <div className="font-display text-[28px] font-extrabold" style={{ color: data.warnings7d > 0 ? 'var(--err)' : 'var(--suc)' }}>
+            {data.warnings7d}
+          </div>
         </div>
         <div className="metric-card">
           <div className="text-[10px] uppercase tracking-wider text-[var(--txt2)] mb-2">Account risk</div>
-          <div className="font-display text-[28px] font-extrabold text-[var(--suc)]">Low</div>
+          <div className="font-display text-[28px] font-extrabold" style={{ color: riskColor }}>{data.risk}</div>
         </div>
       </div>
 
       <div className="card-e mb-4">
-        <div className="text-xs font-semibold mb-3.5">Daily action limits</div>
+        <div className="text-xs font-semibold mb-3.5">Daily action limits (rolling 24h)</div>
         {gauges.map((g, idx) => (
           <div className="gauge-row" key={idx}>
             <div className="flex-1 text-[13px]">{g.label}</div>
             <div className="gauge-bar-w">
               <div
                 className="gauge-bar"
-                style={{ width: `${Math.round((g.used / g.limit) * 100)}%`, background: g.color }}
+                style={{ width: `${g.limit ? Math.min(100, Math.round((g.used / g.limit) * 100)) : 0}%`, background: g.color }}
               ></div>
             </div>
             <div className="w-10 text-right text-xs font-semibold" style={{ color: g.color }}>
@@ -74,17 +123,17 @@ export const HealthView: React.FC<HealthViewProps> = ({ onUpdateSetting }) => {
       </div>
 
       <div className="card-e">
-        <div className="text-xs font-semibold mb-3.5">Safety settings</div>
+        <div className="text-xs font-semibold mb-3.5">Approval settings</div>
         <div id="health-togs">
-          {safetySettings.map(s => (
-            <div className="flex items-center justify-between gap-3 text-[13px] mb-3.5" key={s.id}>
-              <span>{s.label}</span>
-              <label className="tog" htmlFor={s.id}>
+          {toggles.map(t => (
+            <div className="flex items-center justify-between gap-3 text-[13px] mb-3.5" key={t.key}>
+              <span>{t.label}{saving === t.key ? ' (saving…)' : ''}</span>
+              <label className="tog" htmlFor={t.key}>
                 <input
                   type="checkbox"
-                  id={s.id}
-                  defaultChecked={s.def}
-                  onChange={onUpdateSetting}
+                  id={t.key}
+                  checked={t.checked}
+                  onChange={(e) => updateSetting(t.key, e.target.checked)}
                 />
                 <span className="tog-slider"></span>
               </label>

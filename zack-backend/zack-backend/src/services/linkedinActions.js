@@ -25,14 +25,13 @@ export async function commentOnPost(page, { postUrl, commentText }) {
   const auth = detectAuthProblem(page);
   if (auth.problem) return { success: false, ...auth };
 
-  // TODO verify selector: LinkedIn's comment box is usually inside a
-  // div[role="textbox"] under the comments section.
-  const commentBox = page.locator('div.comments-comment-box [role="textbox"]').first();
+  const commentBox = page
+    .locator('div[aria-label="Text editor for creating comment"][contenteditable="true"]')
+    .first();
   await commentBox.scrollIntoViewIfNeeded();
   await humanType(commentBox, commentText);
 
-  // TODO verify selector: the submit/post button near the comment box.
-  const submitBtn = page.locator('button.comments-comment-box__submit-button').first();
+  const submitBtn = page.getByRole('button', { name: 'Comment', exact: true }).first();
   await submitBtn.click();
 
   return { success: true };
@@ -44,22 +43,27 @@ export async function sendConnectionRequest(page, { profileUrl, note }) {
   const auth = detectAuthProblem(page);
   if (auth.problem) return { success: false, ...auth };
 
-  // TODO verify selector: "Connect" button, sometimes behind a "More" menu.
   const connectBtn = page.getByRole('button', { name: /connect/i }).first();
   await connectBtn.click();
 
   if (note) {
-    // TODO verify: "Add a note" flow opens a textarea before final send.
-    const addNoteBtn = page.getByRole('button', { name: /add a note/i }).first();
+    const addNoteBtn = page.getByRole('button', { name: 'Add a note', exact: true }).first();
     if (await addNoteBtn.isVisible().catch(() => false)) {
       await addNoteBtn.click();
       const noteBox = page.locator('textarea[name="message"]').first();
       await humanType(noteBox, note);
-    }
-  }
 
-  const sendBtn = page.getByRole('button', { name: /^send$/i }).first();
-  await sendBtn.click();
+      const sendBtn = page.getByRole('button', { name: 'Send invitation', exact: true }).first();
+      await sendBtn.click();
+    } else {
+      // No "Add a note" option appeared (some accounts/regions skip straight to send) - fall through to plain send.
+      const sendBtn = page.getByRole('button', { name: /^send/i }).first();
+      await sendBtn.click();
+    }
+  } else {
+    const sendWithoutNoteBtn = page.getByRole('button', { name: 'Send without a note', exact: true }).first();
+    await sendWithoutNoteBtn.click();
+  }
 
   return { success: true };
 }
@@ -138,4 +142,94 @@ export async function mineComments(page, { postUrl }) {
   }
 
   return { success: true, comments };
+}
+
+/**
+ * Opens each conversation in the list (list rows have no scrapeable URL of
+ * their own - LinkedIn only reveals it once you navigate in, so this clicks
+ * through like a human would) and captures the real thread URL + messages
+ * in one pass.
+ */
+export async function scanInboxSummary(page, { maxConversations = 10 } = {}) {
+  await page.goto('https://www.linkedin.com/messaging/', { waitUntil: 'domcontentloaded' });
+
+  const auth = detectAuthProblem(page);
+  if (auth.problem) return { success: false, ...auth, conversations: [] };
+
+  const rows = await page.locator('li.msg-conversation-listitem').all();
+  const conversations = [];
+
+  for (const row of rows.slice(0, maxConversations)) {
+    const name = await row.locator('.msg-conversation-listitem__participant-names').first().innerText().catch(() => '');
+    const isUnread = await row.locator('.msg-conversation-card__unread-count').count().then(c => c > 0).catch(() => false);
+    // Strip a leading "Name: " prefix - LinkedIn shows it for both "You:" and the other person's name.
+    const rawPreview = await row.locator('.msg-conversation-card__message-snippet').first().innerText().catch(() => '');
+    const preview = rawPreview.replace(/^[^:]{1,40}:\s*/, '').trim();
+
+    const clickable = row.locator('.msg-conversation-listitem__link').first();
+    await clickable.click().catch(() => {});
+    await page.waitForTimeout(1000 + Math.random() * 1500); // let the thread load, human-paced
+
+    const conversationUrl = page.url();
+    const urnMatch = conversationUrl.match(/thread\/([^/]+)\//);
+    const urn = urnMatch ? urnMatch[1] : conversationUrl;
+
+    const profileUrl = await page.locator('a[href*="/in/"]').first().getAttribute('href').catch(() => null);
+
+    conversations.push({
+      urn,
+      name: name.trim(),
+      preview,
+      conversationUrl,
+      profileUrl: profileUrl ? profileUrl.split('?')[0] : null,
+      isUnread,
+    });
+
+    await page.waitForTimeout(500 + Math.random() * 1000); // pause between rows
+  }
+
+  return { success: true, conversations };
+}
+
+/** Opens one thread and reads its message history. */
+export async function scanConversationThread(page, { conversationUrl }) {
+  await page.goto(conversationUrl, { waitUntil: 'domcontentloaded' });
+
+  const auth = detectAuthProblem(page);
+  if (auth.problem) return { success: false, ...auth, messages: [] };
+
+  const items = await page.locator('li.msg-s-message-list__event').all();
+  const messages = [];
+
+  for (const item of items) {
+    const eventDiv = item.locator('div.msg-s-event-listitem').first();
+    const classAttr = await eventDiv.getAttribute('class').catch(() => '');
+    const isFromOther = (classAttr || '').includes('msg-s-event-listitem--other');
+
+    const bodyEls = await item.locator('p.msg-s-event-listitem__body').all();
+    for (const body of bodyEls) {
+      const text = await body.innerText().catch(() => '');
+      if (text.trim()) {
+        messages.push({ sender: isFromOther ? 'them' : 'me', text: text.trim() });
+      }
+    }
+  }
+
+  return { success: true, messages };
+}
+
+/** Sends a reply in an EXISTING thread (different from sendDirectMessage, which opens a new/first thread from a profile). */
+export async function sendReplyInThread(page, { conversationUrl, text }) {
+  await page.goto(conversationUrl, { waitUntil: 'domcontentloaded' });
+
+  const auth = detectAuthProblem(page);
+  if (auth.problem) return { success: false, ...auth };
+
+  const msgBox = page.locator('div.msg-form__contenteditable[role="textbox"]').first();
+  await humanType(msgBox, text);
+
+  const sendBtn = page.getByRole('button', { name: /^send$/i }).first();
+  await sendBtn.click();
+
+  return { success: true };
 }

@@ -2,7 +2,7 @@ import { supabase } from '../db/supabaseClient.js';
 import { getDecryptedSession, recordSessionFailure } from '../services/sessionVault.js';
 import { checkCap, recordAction } from '../services/rateLimiter.js';
 import { withSession } from '../services/playwrightSession.js';
-import { commentOnPost, sendConnectionRequest, sendDirectMessage } from '../services/linkedinActions.js';
+import { commentOnPost, sendConnectionRequest, sendDirectMessage, sendReplyInThread } from '../services/linkedinActions.js';
 import { markPostSeen } from '../services/dedup.js';
 import { commentsRequiredForTier, expiryDaysForTier } from '../services/warmup.js';
 import { sendAlert } from '../services/telegram.js';
@@ -60,12 +60,14 @@ export async function runDueActionsForUser(userId) {
         comment: settings?.auto_approve_comments ?? true,
         connect: settings?.auto_approve_connects ?? true,
         dm: settings?.auto_approve_dms ?? false,
+        reply: settings?.auto_approve_dms ?? false,
       };
       if (item.requires_approval && item.status !== 'approved' && !autoApproveMap[item.action_type]) {
         continue; // stays queued, waits for manual approval
       }
 
-      const cap = await checkCap(userId, item.action_type);
+      const capKey = item.action_type === 'reply' ? 'dm' : item.action_type;
+      const cap = await checkCap(userId, capKey);
       if (!cap.allowed) continue; // skip, will be picked up tomorrow's window
 
       await respectMinGap();
@@ -84,6 +86,11 @@ export async function runDueActionsForUser(userId) {
             profileUrl: item.payload.profileUrl,
             messageText: item.payload.text,
           });
+        } else if (item.action_type === 'reply') {
+          result = await sendReplyInThread(page, {
+            conversationUrl: item.payload.conversationUrl,
+            text: item.payload.text,
+          });
         } else {
           continue; // 'post' and 'scan' handled by separate jobs
         }
@@ -96,7 +103,7 @@ export async function runDueActionsForUser(userId) {
           .from('action_queue')
           .update({ status: 'done', executed_at: new Date().toISOString() })
           .eq('id', item.id);
-        await recordAction(userId, item.action_type);
+        await recordAction(userId, capKey);
 
         if (item.action_type === 'comment' && item.post_urn) {
           await markPostSeen(userId, item.post_urn, { trackedProfileId: item.tracked_profile_id, commented: true });

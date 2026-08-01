@@ -132,6 +132,23 @@ create table if not exists voice_corrections (
 
 create index if not exists idx_voice_corrections_user_type on voice_corrections(user_id, action_type, created_at desc);
 
+-- Posts found, not yet acted on
+create table if not exists discovered_posts (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  tracked_profile_id uuid references tracked_profiles(id),
+  post_urn text not null,
+  post_url text,
+  post_text text,
+  author_name text,
+  drafted_comment text,
+  status text not null default 'pending' check (status in ('pending','queued','skipped')),
+  discovered_at timestamptz not null default now(),
+  unique (user_id, post_urn)
+);
+
+create index if not exists idx_discovered_posts_status on discovered_posts(user_id, status);
+
 create index if not exists idx_tracked_profiles_status on tracked_profiles(user_id, status);
 create index if not exists idx_action_queue_scheduled on action_queue(status, scheduled_at);
 create index if not exists idx_seen_posts_urn on seen_posts(user_id, post_urn);

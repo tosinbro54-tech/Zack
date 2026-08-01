@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Prospect } from '../types';
+import { api } from '../lib/api';
 
 interface OutreachViewProps {
   prospects: Prospect[];
@@ -15,6 +16,12 @@ interface OutreachViewProps {
 
 interface OptionResult {
   text: string;
+}
+
+interface PendingDraft {
+  id: string;
+  payload: { text: string; targetLabel?: string };
+  tracked_profiles?: { full_name: string; headline: string } | null;
 }
 
 export const OutreachView: React.FC<OutreachViewProps> = ({
@@ -34,18 +41,19 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
   const [generating, setGenerating] = useState(false);
   const [options, setOptions] = useState<OptionResult[]>([]);
 
-  // List of initial static outbound card items we keep for simulation
-  const [pendingDrafts, setPendingDrafts] = useState([
-    { id: 101, name: 'Sarah Okonkwo', hl: 'VP GTM @ Paydeck', text: "Hey Sarah, saw your post on warm signal outreach — worth a quick 15 min?" },
-    { id: 102, name: 'Tunde Adesola', hl: 'VP Sales @ Verto FX', text: "Hey Tunde, loved your GTM advice. We are executing a similar sprint this quarter." },
-    { id: 103, name: 'Marcus Webb', hl: 'Founder @ Closerstack', text: "Hey Marcus, your post on cold email fatigue is spot-on. Lets stay connected." }
-  ]);
+  const [pendingDrafts, setPendingDrafts] = useState<PendingDraft[]>([]);
 
-  const handleProspectChange = (idStr: string) => {
-    setSelectedProspectId(idStr);
-    if (!idStr) return;
+  const loadPendingDrafts = () => {
+    api.get('/api/queue/pending-dms').then(setPendingDrafts).catch(() => setPendingDrafts([]));
+  };
 
-    const matched = prospects.find(p => p.id === parseInt(idStr));
+  useEffect(() => { loadPendingDrafts(); }, []);
+
+  const handleProspectChange = (id: string) => {
+    setSelectedProspectId(id);
+    if (!id) return;
+
+    const matched = prospects.find(p => String(p.id) === id);
     if (matched) {
       setProspectName(matched.name);
       setProspectHeadline(matched.hl);
@@ -54,9 +62,7 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
   };
 
   const handleGenerateOutreach = async () => {
-    if (!prospectName.trim()) {
-      return;
-    }
+    if (!prospectName.trim()) return;
 
     setGenerating(true);
     setOptions([]);
@@ -86,13 +92,31 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
 
       setOptions(parsed.options || [{ text: raw }]);
     } catch {
-      // Ignored: reported via notification alerts
+      // toast handled upstream
     } finally {
       setGenerating(false);
     }
   };
 
-  const handleDiscardDraft = (id: number) => {
+  const handleQueueOption = async (text: string) => {
+    const matched = prospects.find(p => String(p.id) === selectedProspectId);
+    await api.post('/api/queue', {
+      actionType: 'dm',
+      targetLabel: prospectName,
+      text,
+      trackedProfileId: matched ? String(matched.id) : undefined,
+    });
+    onAddToQueue('DM', prospectName, text);
+    loadPendingDrafts();
+  };
+
+  const handleDiscardDraft = async (id: string) => {
+    await api.post(`/api/queue/${id}/reject`).catch(() => {});
+    setPendingDrafts(prev => prev.filter(d => d.id !== id));
+  };
+
+  const handleApproveDraft = async (id: string) => {
+    await api.post(`/api/queue/${id}/approve`).catch(() => {});
     setPendingDrafts(prev => prev.filter(d => d.id !== id));
   };
 
@@ -108,15 +132,11 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
 
       <div className="card-e mb-4">
         <div className="text-xs font-semibold mb-3.5">Generate new outreach</div>
-        
+
         <div className="grid2 gap-3 mb-3">
           <div>
             <label className="text-xs mb-1 block">Type</label>
-            <select
-              className="sel w-full mt-1.5"
-              value={type}
-              onChange={e => setType(e.target.value)}
-            >
+            <select className="sel w-full mt-1.5" value={type} onChange={e => setType(e.target.value)}>
               <option value="connection_note">Connection note (300 chars)</option>
               <option value="opening_dm">Opening DM</option>
               <option value="followup_1">Follow-up to silence</option>
@@ -126,14 +146,10 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
 
           <div>
             <label className="text-xs mb-1 block">From CRM</label>
-            <select
-              className="sel w-full mt-1.5"
-              value={selectedProspectId}
-              onChange={e => handleProspectChange(e.target.value)}
-            >
+            <select className="sel w-full mt-1.5" value={selectedProspectId} onChange={e => handleProspectChange(e.target.value)}>
               <option value="">Type name below…</option>
               {prospects.map(p => (
-                <option value={p.id} key={p.id}>
+                <option value={String(p.id)} key={String(p.id)}>
                   {p.name} · {p.co}
                 </option>
               ))}
@@ -144,53 +160,27 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
         <div className="grid grid-cols-3 gap-2.5 mb-3">
           <div>
             <label className="text-xs mb-1 block">Name</label>
-            <input
-              className="inp mt-1.5"
-              placeholder="Jane Doe"
-              value={prospectName}
-              onChange={e => setProspectName(e.target.value)}
-            />
+            <input className="inp mt-1.5" placeholder="Jane Doe" value={prospectName} onChange={e => setProspectName(e.target.value)} />
           </div>
           <div>
             <label className="text-xs mb-1 block">Headline</label>
-            <input
-              className="inp mt-1.5"
-              placeholder="VP Sales @ Acme"
-              value={prospectHeadline}
-              onChange={e => setProspectHeadline(e.target.value)}
-            />
+            <input className="inp mt-1.5" placeholder="VP Sales @ Acme" value={prospectHeadline} onChange={e => setProspectHeadline(e.target.value)} />
           </div>
           <div>
             <label className="text-xs mb-1 block">Company</label>
-            <input
-              className="inp mt-1.5"
-              placeholder="Acme"
-              value={prospectCompany}
-              onChange={e => setProspectCompany(e.target.value)}
-            />
+            <input className="inp mt-1.5" placeholder="Acme" value={prospectCompany} onChange={e => setProspectCompany(e.target.value)} />
           </div>
         </div>
 
         <div className="fg">
           <label className="text-xs mb-1 block">Offer / angle hook</label>
-          <input
-            className="inp"
-            placeholder="e.g. We help Series A founders 3x demo bookings without ads"
-            value={angle}
-            onChange={e => setAngle(e.target.value)}
-          />
+          <input className="inp" placeholder="e.g. We help Series A founders 3x demo bookings without ads" value={angle} onChange={e => setAngle(e.target.value)} />
         </div>
 
         {type === 'reply_to_inbound' && (
           <div className="fg" id="inbound-div">
             <label className="text-xs mb-1 block">Their inbound message</label>
-            <textarea
-              className="ta"
-              rows={3}
-              placeholder="Paste what they said…"
-              value={inboundText}
-              onChange={e => setInboundText(e.target.value)}
-            ></textarea>
+            <textarea className="ta" rows={3} placeholder="Paste what they said…" value={inboundText} onChange={e => setInboundText(e.target.value)}></textarea>
           </div>
         )}
 
@@ -206,16 +196,10 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
               <div className="text-[10px] uppercase tracking-wider text-[var(--acc)] mb-2">Option {idx + 1}</div>
               <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{o.text}</p>
               <div className="flex gap-2.5 justify-end mt-3">
-                <button
-                  className="btn-sm btn-edit cursor-pointer"
-                  onClick={() => navigator.clipboard.writeText(o.text)}
-                >
+                <button className="btn-sm btn-edit cursor-pointer" onClick={() => navigator.clipboard.writeText(o.text)}>
                   Copy
                 </button>
-                <button
-                  className="btn-sm btn-approve cursor-pointer"
-                  onClick={() => onAddToQueue('DM', prospectName, o.text)}
-                >
+                <button className="btn-sm btn-approve cursor-pointer" onClick={() => handleQueueOption(o.text)}>
                   → Queue
                 </button>
               </div>
@@ -227,26 +211,21 @@ export const OutreachView: React.FC<OutreachViewProps> = ({
       <div className="divider"></div>
 
       <div className="text-[13px] font-medium mb-3 font-display">Pending outreach drafts</div>
+      {pendingDrafts.length === 0 && (
+        <div className="card-e p-4 text-[13px] text-[var(--txt2)]">No pending drafts right now.</div>
+      )}
       {pendingDrafts.map(d => (
         <div className="q-item" key={d.id}>
           <span className="badge badge-amber shrink-0">DM</span>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold">
-              {d.name} <span className="text-[10px] text-[var(--txt3)] ml-1.5 font-normal">{d.hl}</span>
+              {d.tracked_profiles?.full_name || d.payload.targetLabel || 'Unknown'}
+              <span className="text-[10px] text-[var(--txt3)] ml-1.5 font-normal">{d.tracked_profiles?.headline}</span>
             </div>
-            <div className="text-xs text-[var(--txt2)] mt-1 truncate">{d.text}</div>
+            <div className="text-xs text-[var(--txt2)] mt-1 truncate">{d.payload.text}</div>
             <div className="flex gap-1.5 mt-2">
-              <button
-                className="btn-sm btn-approve cursor-pointer"
-                onClick={() => {
-                  onAddToQueue('DM', d.name, d.text);
-                  handleDiscardDraft(d.id);
-                }}
-              >
+              <button className="btn-sm btn-approve cursor-pointer" onClick={() => handleApproveDraft(d.id)}>
                 Approve
-              </button>
-              <button className="btn-sm btn-edit cursor-pointer" onClick={() => {}}>
-                Edit
               </button>
               <button className="btn-sm btn-reject cursor-pointer" onClick={() => handleDiscardDraft(d.id)}>
                 Discard

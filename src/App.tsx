@@ -18,55 +18,17 @@ import { InboxView } from './components/InboxView';
 import { QueueView } from './components/QueueView';
 import { HealthView } from './components/HealthView';
 
-import {
-  INITIAL_QUEUE_ITEMS,
-  INITIAL_PROSPECTS,
-  INITIAL_CREATORS,
-  INITIAL_ICP,
-  NAV
-} from './data';
+import { NAV } from './data';
 import { Creator, Icp, Prospect, QueueItem, VoiceProfile } from './types';
 import { supabase } from './lib/supabase';
+import { api } from './lib/api';
+
+const DEFAULT_ICP: Icp = { titles: [], industries: [], locations: [], keywords: [] };
 
 export default function App() {
-  // Navigation views
   const [mainView, setMainView] = useState<'landing' | 'auth' | 'app'>('landing');
   const [currentView, setCurrentView] = useState<string>('dashboard');
-  const [userEmail, setUserEmail] = useState('operator@example.com');
 
-  useEffect(() => {
-    // Check initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        setMainView('app');
-        setUserEmail(session.user?.email || 'operator@example.com');
-      } else {
-        setMainView('landing');
-      }
-    });
-
-    // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session) {
-        setMainView('app');
-        setUserEmail(session.user?.email || 'operator@example.com');
-      } else {
-        setMainView('landing');
-        setUserEmail('operator@example.com');
-      }
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
-
-  // Shared application states
-  const [geminiKey, setGeminiKey] = useState<string>(() => {
-    return ((import.meta as any).env?.VITE_GEMINI_API_KEY || '') as string;
-  });
-  
   const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>({
     tone: 'Conversational, direct, data-driven. Never corporate-speak.',
     positioning: '',
@@ -74,28 +36,23 @@ export default function App() {
     sample_posts: []
   });
 
-  const [icp, setIcp] = useState<Icp>(INITIAL_ICP);
-  const [queueItems, setQueueItems] = useState<QueueItem[]>(INITIAL_QUEUE_ITEMS);
-  const [prospects, setProspects] = useState<Prospect[]>(INITIAL_PROSPECTS);
-  const [trackedCreators, setTrackedCreators] = useState<Creator[]>(INITIAL_CREATORS);
+  const [icp, setIcp] = useState<Icp>(DEFAULT_ICP);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
+  const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [trackedCreators, setTrackedCreators] = useState<Creator[]>([]);
 
-  // Floating notifications
   const [toast, setToast] = useState<{ message: string; type: 'ok' | 'err'; show: boolean }>({
     message: '',
     type: 'ok',
     show: false
   });
 
-  // Key selector popup
   const [showKeyModal, setShowKeyModal] = useState(false);
-  const [tempApiKey, setTempApiKey] = useState('');
+  const [stats, setStats] = useState<any>(null);
 
-  // Auto-clear notification toast after delay time
   useEffect(() => {
     if (toast.show) {
-      const timer = setTimeout(() => {
-        setToast(prev => ({ ...prev, show: false }));
-      }, 3000);
+      const timer = setTimeout(() => setToast(prev => ({ ...prev, show: false })), 3000);
       return () => clearTimeout(timer);
     }
   }, [toast.show]);
@@ -104,16 +61,51 @@ export default function App() {
     setToast({ message, type, show: true });
   };
 
-  const handleLaunch = () => {
-    setMainView('auth');
-  };
+  // Load real data once we're inside the app
+  useEffect(() => {
+    if (mainView !== 'app') return;
+
+    api.get('/api/prospects').then((data) => {
+      setProspects(data.filter((p: any) => p.kind === 'icp_prospect'));
+      setTrackedCreators(data.filter((p: any) => p.kind === 'creator'));
+    }).catch(() => showToast('Failed to load prospects', 'err'));
+
+    api.get('/api/queue').then(setQueueItems).catch(() => showToast('Failed to load queue', 'err'));
+
+    api.get('/api/stats/dashboard').then(setStats).catch(() => showToast('Failed to load stats', 'err'));
+
+    api.get('/api/icp').then((data) => {
+      if (data?.criteria) {
+        setIcp({ ...DEFAULT_ICP, ...data.criteria });
+      }
+    }).catch(() => {});
+
+    api.get('/api/voice/profile').then((data) => {
+      if (data?.sample_writing || data?.tone_notes) {
+        setVoiceProfile((prev) => ({
+          ...prev,
+          tone: data.tone_notes || prev.tone,
+          sample_posts: data.sample_writing ? data.sample_writing.split('---') : prev.sample_posts,
+        }));
+      }
+    }).catch(() => {});
+  }, [mainView]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) { setMainView('app'); setCurrentView('dashboard'); }
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) setMainView('landing');
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const handleLaunch = () => setMainView('auth');
 
   const handleAuthSuccess = () => {
     showToast('Welcome back, operator ✓', 'ok');
-    setTimeout(() => {
-      setMainView('app');
-      setCurrentView('dashboard');
-    }, 350);
+    setTimeout(() => { setMainView('app'); setCurrentView('dashboard'); }, 350);
   };
 
   const handleSignOut = async () => {
@@ -122,78 +114,61 @@ export default function App() {
     showToast('Signed out.', 'ok');
   };
 
-  const handleApiKeySave = (key: string) => {
-    if (key.trim()) {
-      setGeminiKey(key.trim());
-      showToast('Gemini API key saved ✓ — AI generation enabled', 'ok');
-      setShowKeyModal(false);
+  // Now hits the backend proxy - Gemini key never touches the browser.
+  const handleCallGemini = async (sys: string, user: string): Promise<string> => {
+    try {
+      const data = await api.post('/api/ai/generate', { sys, user });
+      return data.text || '';
+    } catch (err) {
+      showToast('AI request failed', 'err');
+      throw err;
     }
   };
 
-  // Add Comment/DM drafts to the primary review list queue
-  const handleAddToQueue = (type: string, target: string, text: string) => {
-    const newItem: QueueItem = {
-      id: Date.now(),
-      type,
-      typeColor: type === 'Comment' ? 'badge-blue' : 'badge-amber',
-      target,
-      text,
-      dismissed: false
-    };
-    setQueueItems(prev => [newItem, ...prev]);
-    showToast('Added to approval queue ✓', 'ok');
+  const handleAddToQueue = async (type: string, target: string, text: string) => {
+    try {
+      const item = await api.post('/api/queue', {
+        actionType: type.toLowerCase(),
+        targetLabel: target,
+        text,
+      });
+      setQueueItems(prev => [item, ...prev]);
+      showToast('Added to approval queue ✓', 'ok');
+    } catch {
+      showToast('Failed to add to queue', 'err');
+    }
   };
 
-  const handleApproveItem = (id: number) => {
-    setQueueItems(prev => prev.map(item => item.id === id ? { ...item, dismissed: true } : item));
-    showToast('Action sent ✓', 'ok');
+  const handleApproveItem = async (id: string | number) => {
+    try {
+      await api.post(`/api/queue/${id}/approve`);
+      setQueueItems(prev => prev.map(item => item.id === id ? { ...item, dismissed: true } : item));
+      showToast('Action sent ✓', 'ok');
+    } catch {
+      showToast('Failed to approve', 'err');
+    }
   };
 
-  const handleRejectItem = (id: number) => {
-    setQueueItems(prev => prev.map(item => item.id === id ? { ...item, dismissed: true } : item));
-    showToast('Action discarded', 'ok');
+  const handleRejectItem = async (id: string | number) => {
+    try {
+      await api.post(`/api/queue/${id}/reject`);
+      setQueueItems(prev => prev.map(item => item.id === id ? { ...item, dismissed: true } : item));
+      showToast('Action discarded', 'ok');
+    } catch {
+      showToast('Failed to discard', 'err');
+    }
   };
 
-  const handleApproveAll = () => {
+  const handleApproveAll = async () => {
+    await Promise.all(queueItems.map(item => api.post(`/api/queue/${item.id}/approve`).catch(() => {})));
     setQueueItems(prev => prev.map(item => ({ ...item, dismissed: true })));
     showToast('All approved and queued ✓', 'ok');
   };
 
-  const handleDiscardAll = () => {
+  const handleDiscardAll = async () => {
+    await Promise.all(queueItems.map(item => api.post(`/api/queue/${item.id}/reject`).catch(() => {})));
     setQueueItems(prev => prev.map(item => ({ ...item, dismissed: true })));
     showToast('All discarded', 'ok');
-  };
-
-  // callGemini utility utilizing direct models.generateContent compatibility standard
-  const handleCallGemini = async (sys: string, user: string): Promise<string> => {
-    if (!geminiKey) {
-      showToast('Add your Gemini API key — click "Add key" on dashboard', 'err');
-      throw new Error('No Gemini API key.');
-    }
-
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${geminiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gemini-3.5-flash',
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: user }
-        ]
-      })
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      showToast('Gemini API request failed', 'err');
-      throw new Error(`Gemini ${res.status}: ${errorText.slice(0, 200)}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
   };
 
   const retrieveVoicePrompt = () => {
@@ -210,49 +185,70 @@ export default function App() {
   const renderActiveView = () => {
     switch (currentView) {
       case 'dashboard':
-        return (
-          <DashboardView
-            onNavigate={setCurrentView}
-            onShowKeyModal={() => {
-              setTempApiKey(geminiKey);
-              setShowKeyModal(true);
-            }}
-          />
-        );
+        return <DashboardView onNavigate={setCurrentView} stats={stats} />;
       case 'voice':
         return (
           <VoiceView
             initialVoice={voiceProfile}
             initialIcp={icp}
-            onSave={(voice, updatedIcp) => {
+            onSave={async (voice, updatedIcp) => {
               setVoiceProfile(voice);
               setIcp(updatedIcp);
-              showToast('Voice profile saved ✓', 'ok');
+              try {
+                await api.put('/api/voice/profile', {
+                  toneNotes: voice.tone,
+                  sampleWriting: voice.sample_posts?.join('---'),
+                });
+                await api.put('/api/icp', { criteria: updatedIcp });
+                showToast('Voice profile saved ✓', 'ok');
+              } catch {
+                showToast('Failed to save voice profile', 'err');
+              }
             }}
           />
         );
       case 'linkedin':
-        return (
-          <LinkedinView
-            onVerify={() => showToast('Session verified ✓ — ready to operate.', 'ok')}
-          />
-        );
+        return <LinkedinView />;
       case 'discover':
         return (
           <DiscoverView
             trackedCreators={trackedCreators}
-            onAddCreator={creator => {
-              setTrackedCreators(prev => [creator, ...prev]);
-              showToast(`${creator.name} added ✓`, 'ok');
+            onAddCreator={async (creator) => {
+              try {
+                const saved = await api.post('/api/prospects', {
+                  profileUrl: creator.profileUrl || creator.name,
+                  kind: 'creator',
+                  fullName: creator.name,
+                  headline: creator.hl,
+                });
+                setTrackedCreators(prev => [saved, ...prev]);
+                showToast(`${creator.name} added ✓`, 'ok');
+              } catch {
+                showToast('Failed to add creator', 'err');
+              }
             }}
-            onRemoveCreator={id => {
-              const item = trackedCreators.find(c => c.id === id);
-              setTrackedCreators(prev => prev.filter(c => c.id !== id));
-              showToast(`${item?.name || 'Creator'} removed`, 'ok');
+            onRemoveCreator={async (id) => {
+              try {
+                await api.del(`/api/prospects/${id}`);
+                setTrackedCreators(prev => prev.filter(c => c.id !== id));
+                showToast('Creator removed', 'ok');
+              } catch {
+                showToast('Failed to remove creator', 'err');
+              }
             }}
-            onAddProspect={p => {
-              setProspects(prev => [p, ...prev]);
-              showToast(`${p.name} added to prospects ✓`, 'ok');
+            onAddProspect={async (p) => {
+              try {
+                const saved = await api.post('/api/prospects', {
+                  profileUrl: p.profileUrl || p.name,
+                  kind: 'icp_prospect',
+                  fullName: p.name,
+                  headline: p.hl,
+                });
+                setProspects(prev => [saved, ...prev]);
+                showToast(`${p.name} added to prospects ✓`, 'ok');
+              } catch {
+                showToast('Failed to add prospect', 'err');
+              }
             }}
             onAddToQueue={handleAddToQueue}
             callGemini={handleCallGemini}
@@ -260,20 +256,17 @@ export default function App() {
           />
         );
       case 'comments':
-        return (
-          <CommentsView
-            onAddToQueue={handleAddToQueue}
-            callGemini={handleCallGemini}
-            voicePrompt={retrieveVoicePrompt}
-          />
-        );
+        return <CommentsView onAddToQueue={handleAddToQueue} callGemini={handleCallGemini} voicePrompt={retrieveVoicePrompt} />;
       case 'studio':
         return (
           <StudioView
             onAddToQueue={handleAddToQueue}
             callGemini={handleCallGemini}
             voicePrompt={retrieveVoicePrompt}
-            geminiKey={geminiKey}
+            generateImage={async (prompt: string) => {
+              const data = await api.post('/api/ai/generate-image', { prompt });
+              return data.dataUrl;
+            }}
           />
         );
       case 'prospects':
@@ -281,9 +274,19 @@ export default function App() {
           <ProspectsView
             prospects={prospects}
             icp={icp}
-            onAddProspect={p => {
-              setProspects(prev => [p, ...prev]);
-              showToast(`${p.name} added ✓`, 'ok');
+            onAddProspect={async (p) => {
+              try {
+                const saved = await api.post('/api/prospects', {
+                  profileUrl: p.profileUrl || p.name,
+                  kind: 'icp_prospect',
+                  fullName: p.name,
+                  headline: p.hl,
+                });
+                setProspects(prev => [saved, ...prev]);
+                showToast(`${p.name} added ✓`, 'ok');
+              } catch {
+                showToast('Failed to add prospect', 'err');
+              }
             }}
             onAddToQueue={handleAddToQueue}
             onUpdateProspectList={setProspects}
@@ -291,22 +294,9 @@ export default function App() {
           />
         );
       case 'outreach':
-        return (
-          <OutreachView
-            prospects={prospects}
-            onAddToQueue={handleAddToQueue}
-            callGemini={handleCallGemini}
-            voicePrompt={retrieveVoicePrompt}
-          />
-        );
+        return <OutreachView prospects={prospects} onAddToQueue={handleAddToQueue} callGemini={handleCallGemini} voicePrompt={retrieveVoicePrompt} />;
       case 'inbox':
-        return (
-          <InboxView
-            onAddToQueue={handleAddToQueue}
-            callGemini={handleCallGemini}
-            voicePrompt={retrieveVoicePrompt}
-          />
-        );
+        return <InboxView onAddToQueue={handleAddToQueue} callGemini={handleCallGemini} voicePrompt={retrieveVoicePrompt} />;
       case 'queue':
         return (
           <QueueView
@@ -318,35 +308,18 @@ export default function App() {
           />
         );
       case 'health':
-        return (
-          <HealthView
-            onUpdateSetting={() => showToast('Setting updated ✓', 'ok')}
-          />
-        );
+        return <HealthView />;
       default:
-        return (
-          <DashboardView
-            onNavigate={setCurrentView}
-            onShowKeyModal={() => setShowKeyModal(true)}
-          />
-        );
+        return <DashboardView onNavigate={setCurrentView} stats={stats} />;
     }
   };
 
-  if (mainView === 'landing') {
-    return <LandingView onLaunch={handleLaunch} />;
-  }
-
-  if (mainView === 'auth') {
-    return <AuthView onSuccess={handleAuthSuccess} />;
-  }
+  if (mainView === 'landing') return <LandingView onLaunch={handleLaunch} />;
+  if (mainView === 'auth') return <AuthView onSuccess={handleAuthSuccess} />;
 
   return (
     <div id="app">
-      {/* Toast Notice */}
-      <div id="toast" className={`${toast.show ? 'show' : ''} ${toast.type}`}>
-        {toast.message}
-      </div>
+      <div id="toast" className={`${toast.show ? 'show' : ''} ${toast.type}`}>{toast.message}</div>
 
       <aside className="sidebar">
         <div className="sb-head">
@@ -355,73 +328,28 @@ export default function App() {
         </div>
         <nav className="sb-nav">
           {NAV.map(n => (
-            <div
-              key={n.id}
-              className={`sb-item ${currentView === n.id ? 'active' : ''}`}
-              onClick={() => setCurrentView(n.id)}
-            >
+            <div key={n.id} className={`sb-item ${currentView === n.id ? 'active' : ''}`} onClick={() => setCurrentView(n.id)}>
               <span className="text-[15px]">{n.icon}</span>
               <span>{n.label}</span>
             </div>
           ))}
         </nav>
         <div className="sb-foot">
-          <div className="sb-user">{userEmail}</div>
+          <div className="sb-user">operator@example.com</div>
           <button className="sb-signout" onClick={handleSignOut}>
-            <span>↩</span>
-            <span>Sign out</span>
+            <span>↩</span><span>Sign out</span>
           </button>
         </div>
       </aside>
 
       <main className="main">
-        {/* Expired alert warning */}
         <div className="li-warn hidden">
           <span>⚠</span>
           <span>LinkedIn session expired. Actions will fail until you reconnect.</span>
           <button onClick={() => setCurrentView('linkedin')}>Reconnect</button>
         </div>
-
-        <div className="page" id="page-content">
-          {renderActiveView()}
-        </div>
+        <div className="page" id="page-content">{renderActiveView()}</div>
       </main>
-
-      {/* API Key Modal Form */}
-      {showKeyModal && (
-        <div className="fixed inset-0 bg-black/75 z-[9998] flex items-center justify-center p-4">
-          <div className="bg-[var(--bg2)] border border-[var(--border)] rounded-16 p-8 w-full max-w-[460px]">
-            <h3 className="font-display font-bold text-lg mb-2">Add Gemini API key</h3>
-            <p className="text-xs text-[var(--txt2)] mb-4 leading-relaxed">
-              Get your free key at{' '}
-              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-[var(--pri)] hover:underline">
-                aistudio.google.com/app/apikey
-              </a>. Stays in your browser only.
-            </p>
-            <input
-              className="inp mb-3"
-              type="password"
-              placeholder="AIza..."
-              value={tempApiKey}
-              onChange={e => setTempApiKey(e.target.value)}
-            />
-            <div className="flex gap-2.5">
-              <button
-                className="btn btn-pri flex-grow"
-                onClick={() => handleApiKeySave(tempApiKey)}
-              >
-                Save key
-              </button>
-              <button
-                className="btn btn-out"
-                onClick={() => setShowKeyModal(false)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

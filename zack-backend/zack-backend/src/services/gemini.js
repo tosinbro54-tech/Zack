@@ -85,6 +85,10 @@ Write the next reply. Return only the reply text.
 }
 
 /** ICP fit scoring - only called after the cheap rule-based pre-filter passes. */
+export async function rawGenerate({ sys, user }) {
+  return generate(`${sys}\n\n${user}`);
+}
+
 export async function scoreIcpFit({ headline, about, recentPostTopics, icpCriteria }) {
   const raw = await generate(`
 Given this LinkedIn profile:
@@ -103,4 +107,21 @@ reason. Respond ONLY as JSON: {"score": number, "reason": string}
   } catch {
     return { score: 0, reason: 'Could not parse Gemini response' };
   }
+}
+
+export async function generateImage(prompt) {
+  const imageModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
+  const result = await imageModel.generateContent({
+    contents: [{
+      role: 'user',
+      parts: [{ text: `LinkedIn hero image: ${prompt}. Dark background, premium, high contrast, no stock photo.` }],
+    }],
+    generationConfig: { responseModalities: ['IMAGE'] },
+  });
+
+  const parts = result.response.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((p) => p.inlineData?.data);
+  if (!imagePart) return null;
+
+  return { mimeType: imagePart.inlineData.mimeType, data: imagePart.inlineData.data };
 }

@@ -9,7 +9,7 @@ interface StudioViewProps {
   onAddToQueue: (type: string, target: string, text: string) => void;
   callGemini: (sys: string, user: string) => Promise<string>;
   voicePrompt: () => string;
-  geminiKey: string;
+  generateImage: (prompt: string) => Promise<string>;
 }
 
 interface CarouselSlide {
@@ -17,7 +17,7 @@ interface CarouselSlide {
   body: string;
 }
 
-export const StudioView: React.FC<StudioViewProps> = ({ onAddToQueue, callGemini, voicePrompt, geminiKey }) => {
+export const StudioView: React.FC<StudioViewProps> = ({ onAddToQueue, callGemini, voicePrompt, generateImage }) => {
   const [topic, setTopic] = useState('');
   const [type, setType] = useState('text');
   const [slidesCount, setSlidesCount] = useState(6);
@@ -83,48 +83,9 @@ export const StudioView: React.FC<StudioViewProps> = ({ onAddToQueue, callGemini
     const promptValue = imgPrompt.trim() || 'Modern dark minimal LinkedIn hero image';
     setGeneratingImg(true);
     setGeneratedImgSrc('');
-
     try {
-      if (!geminiKey) {
-        throw new Error('Add your Gemini API key first');
-      }
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: `LinkedIn hero image: ${promptValue}. Dark background, premium, high contrast, no stock photo.`
-                  }
-                ]
-              }
-            ],
-            generationConfig: {
-              responseModalities: ['IMAGE']
-            }
-          })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Image API ${response.status}`);
-      }
-
-      const data = await response.json();
-      const part = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
-
-      if (part?.inlineData?.data) {
-        setGeneratedImgSrc(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
-      } else {
-        setGeneratedImgSrc('No image returned. Try a different prompt.');
-      }
+      const dataUrl = await generateImage(promptValue);
+      setGeneratedImgSrc(dataUrl);
     } catch (e: any) {
       setGeneratedImgSrc(`Error generating image: ${e.message}`);
     } finally {
