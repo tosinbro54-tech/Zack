@@ -38,19 +38,27 @@ linkedinRouter.post('/session/verify', async (req, res) => {
     }
 
     await markSessionVerified(session.id);
+    console.log(`[linkedin/session/verify] user ${userId} verified OK at ${new Date().toISOString()}`);
     res.json({ ok: true, status: 'active' });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error(`[linkedin/session/verify] FAILED for user ${userId}:`, err.message || err);
+    res.status(500).json({ error: String(err.message || err) });
   }
 });
 
 linkedinRouter.get('/session/status', async (req, res) => {
   const userId = req.user.id;
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('linkedin_sessions')
     .select('status, last_verified_at, consecutive_failures')
     .eq('user_id', userId)
     .single();
+
+  if (error) {
+    console.error(`[linkedin/session/status] DB error for user ${userId}:`, error.message);
+    return res.status(500).json({ error: error.message });
+  }
+
   res.json(data || { status: 'unverified' });
 });
 

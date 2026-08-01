@@ -33,6 +33,7 @@ export const LinkedinView: React.FC<LinkedinViewProps> = ({ onVerify }) => {
         }
       } catch (err: any) {
         console.error('Failed to load session status:', err);
+        setError('Could not load session status — see below for details.');
       }
     };
     fetchStatus();

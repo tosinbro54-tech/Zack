@@ -70,10 +70,11 @@ export async function getDecryptedSession(userId) {
 }
 
 export async function markSessionVerified(sessionId) {
-  await supabase
+  const { error } = await supabase
     .from('linkedin_sessions')
     .update({ status: 'active', last_verified_at: new Date().toISOString(), consecutive_failures: 0 })
     .eq('id', sessionId);
+  if (error) throw error;
 }
 
 /**
