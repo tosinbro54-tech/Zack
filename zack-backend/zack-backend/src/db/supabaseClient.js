@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
 import { config } from '../config.js';
 
 // Service-role client — used only server-side, never exposed to the frontend.
@@ -15,5 +16,10 @@ export const supabase = (() => {
   }
   return createClient(config.supabaseUrl, config.supabaseServiceKey, {
     auth: { persistSession: false },
+    // Node 20's native WebSocket isn't picked up by supabase-js's internal
+    // realtime client (even though this app never uses realtime
+    // subscriptions - the client is constructed unconditionally). Passing
+    // 'ws' explicitly avoids the startup crash.
+    realtime: { transport: ws },
   });
 })();
