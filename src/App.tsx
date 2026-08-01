@@ -208,7 +208,7 @@ export default function App() {
           />
         );
       case 'linkedin':
-        return <LinkedinView />;
+        return <LinkedinView onVerify={() => showToast('LinkedIn session verified and active.', 'ok')} />;
       case 'discover':
         return (
           <DiscoverView
