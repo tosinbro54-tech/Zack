@@ -23,16 +23,23 @@ export async function launchWithSession({ liAt, jsessionId, proxy }) {
     viewport: { width: 1366, height: 900 },
   });
 
+  // Defensive cleanup: cookies pasted from DevTools can pick up trailing
+  // whitespace, newlines, or other invisible characters during copy/paste.
+  // CDP rejects cookie values containing raw control characters outright
+  // ("Invalid cookie fields"), so strip those before anything else.
+  const cleanLiAt = liAt.trim().replace(/[\r\n\t]/g, '');
+  const cleanJsessionIdRaw = jsessionId.trim().replace(/[\r\n\t]/g, '');
+
   // LinkedIn's JSESSIONID cookie value is quote-wrapped (e.g. "ajax:12345...")
   // and LinkedIn checks it against the csrf-token header on every request.
   // Normalize here so it doesn't matter whether the quotes survived copy/paste.
   const normalizedJsessionId =
-    jsessionId.startsWith('"') && jsessionId.endsWith('"')
-      ? jsessionId
-      : `"${jsessionId.replace(/"/g, '')}"`;
+    cleanJsessionIdRaw.startsWith('"') && cleanJsessionIdRaw.endsWith('"')
+      ? cleanJsessionIdRaw
+      : `"${cleanJsessionIdRaw.replace(/"/g, '')}"`;
 
   await context.addCookies([
-    { name: 'li_at', value: liAt, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true },
+    { name: 'li_at', value: cleanLiAt, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true },
     { name: 'JSESSIONID', value: normalizedJsessionId, domain: '.linkedin.com', path: '/', secure: true },
   ]);
 
