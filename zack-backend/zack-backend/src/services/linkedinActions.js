@@ -87,6 +87,58 @@ export async function sendDirectMessage(page, { profileUrl, messageText }) {
 }
 
 /**
+ * Reads a profile's headline and About text for ICP scoring. LinkedIn gives
+ * neither of these stable class names to hook into, so this walks the DOM
+ * structurally instead:
+ *  - Headline: the person's name sits in the page's <h1>, and the headline
+ *    is the next text-bearing element after it in the top-card container.
+ *  - About: found via the section whose heading text reads "About", then
+ *    the real data-testid="expandable-text-box" hook inside that section.
+ */
+export async function scanProfileForScoring(page, { profileUrl }) {
+  await page.goto(profileUrl, { waitUntil: 'domcontentloaded' });
+
+  const auth = detectAuthProblem(page);
+  if (auth.problem) return { success: false, ...auth, headline: null, about: null };
+
+  let headline = '';
+  try {
+    await page.locator('h1').first().waitFor({ timeout: 8000 });
+    headline = await page.evaluate(() => {
+      const h1El = document.querySelector('h1');
+      if (!h1El) return '';
+      let sibling = h1El.nextElementSibling;
+      while (sibling) {
+        const text = sibling.textContent?.trim();
+        if (text) return text;
+        sibling = sibling.nextElementSibling;
+      }
+      return '';
+    });
+  } catch {
+    headline = '';
+  }
+
+  let about = '';
+  try {
+    about = await page.evaluate(() => {
+      const sections = Array.from(document.querySelectorAll('section'));
+      const aboutSection = sections.find((s) => {
+        const heading = s.querySelector('h2');
+        return heading && heading.textContent?.trim().toLowerCase().startsWith('about');
+      });
+      if (!aboutSection) return '';
+      const box = aboutSection.querySelector('[data-testid="expandable-text-box"]');
+      return box ? (box.textContent?.trim() || '') : '';
+    });
+  } catch {
+    about = '';
+  }
+
+  return { success: true, headline, about };
+}
+
+/**
  * Scrolls a profile's activity feed collecting post URNs + timestamps + text,
  * pausing between items to look human. Stops once `targetCount` posts are
  * collected or `maxScrollDays` of overscroll budget is exhausted.

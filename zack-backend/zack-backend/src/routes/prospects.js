@@ -4,8 +4,10 @@ import { isProfileTracked } from '../services/dedup.js';
 import { discoverNewPostsForUser } from '../services/discovery.js';
 import { withSession } from '../services/playwrightSession.js';
 import { getDecryptedSession } from '../services/sessionVault.js';
-import { mineComments } from '../services/linkedinActions.js';
+import { mineComments, scanProfileForScoring } from '../services/linkedinActions.js';
 import { passesPreFilter } from '../services/icpScoring.js';
+import { sendTelegramMessage } from '../services/telegram.js';
+import { config } from '../config.js';
 
 export const prospectsRouter = Router();
 
@@ -139,3 +141,30 @@ prospectsRouter.post('/mine-comments', async (req, res) => {
   }
 });
 
+
+// TEMPORARY test route - verifies the headline/about scanner against a real
+// profile without wiring it into the full automated scoring pipeline yet.
+// Call it once with a real profileUrl, check the response (and your
+// Telegram if DEBUG_PROFILE_SCAN is on) to confirm headline/about look
+// right, then this can be removed or left as a manual debug tool.
+prospectsRouter.post('/scan-profile', async (req, res) => {
+  const { profileUrl } = req.body;
+  if (!profileUrl) return res.status(400).json({ error: 'profileUrl is required' });
+
+  const session = await getDecryptedSession(req.user.id);
+  if (!session || session.status !== 'active') return res.status(400).json({ error: 'no active LinkedIn session' });
+
+  try {
+    const result = await withSession(session, (page) => scanProfileForScoring(page, { profileUrl }));
+
+    if (config.debugProfileScan) {
+      await sendTelegramMessage(
+        `*Profile scan test*\n${profileUrl}\n\n*Headline:* ${result.headline || '(empty)'}\n\n*About:* ${(result.about || '(empty)').slice(0, 300)}`
+      ).catch(() => {});
+    }
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
